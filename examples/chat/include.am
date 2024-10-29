@@ -1,0 +1,27 @@
+
+# vim:ft=automake
+# included from Top Level Makefile.am
+# All paths should be given relative to the root
+
+
+if BUILD_EXAMPLE_SERVERS
+noinst_PROGRAMS += examples/chat/chatserver
+noinst_HEADERS += examples/chat/chatserver.h
+examples_chat_chatserver_SOURCES      = examples/chat/chatserver.c
+examples_chat_chatserver_LDADD        = src/libwolfssl@LIBSUFFIX@.la $(LIB_STATIC_ADD)
+examples_chat_chatserver_DEPENDENCIES = src/libwolfssl@LIBSUFFIX@.la
+endif
+
+if BUILD_EXAMPLE_CLIENTS
+noinst_PROGRAMS += examples/chat/chatclient
+noinst_HEADERS += examples/chat/chatclient.h
+examples_chat_chatclient_SOURCES      = examples/chat/chatclient.c
+examples_chat_chatclient_LDADD        = src/libwolfssl@LIBSUFFIX@.la $(LIB_STATIC_ADD)
+examples_chat_chatclient_DEPENDENCIES = src/libwolfssl@LIBSUFFIX@.la
+endif
+
+dist_example_DATA+= examples/chat/chatserver.c
+DISTCLEANFILES+= examples/chat/.libs/chatserver
+
+dist_example_DATA+= examples/chat/chatclient.c
+DISTCLEANFILES+= examples/chat/.libs/chatclient

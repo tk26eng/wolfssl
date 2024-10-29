@@ -68,6 +68,8 @@ wolfcrypt/test/testwolfcrypt
 examples/async/async_client
 examples/async/async_server
 examples/benchmark/tls_bench
+examples/chat/chatclient
+examples/chat/chatserver
 examples/client/client
 examples/echoclient/echoclient
 examples/echoserver/echoserver
