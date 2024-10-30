@@ -1,4 +1,4 @@
-/* echoserver.c
+/* chatserver.c
  *
  * Copyright (C) 2006-2024 wolfSSL Inc.
  *
@@ -39,6 +39,8 @@
         #include "wolfssl_MDK_ARM.h"
 #endif
 
+#include <sys/select.h>
+
 #include <wolfssl/ssl.h>
 #include <wolfssl/test.h>
 
@@ -46,7 +48,7 @@
     #define ECHO_OUT
 #endif
 
-#include "examples/echoserver/echoserver.h"
+#include "examples/chat/chatserver.h"
 
 #ifndef NO_WOLFSSL_SERVER
 
@@ -81,23 +83,214 @@ static void SignalReady(void* args, word16 port)
     (void)port;
 }
 
+typedef struct {
+    SOCKADDR_IN_T saddr;
+    SOCKET_T clientfd;
+    WOLFSSL* ssl;
+    int accept_done;
+} CLIENT_T;
 
-THREAD_RETURN WOLFSSL_THREAD echoserver_test(void* args)
+static int max(int a, int b) {
+    if(a > b){
+       return a; 
+    }
+    else{
+        return b;
+    }
+}
+
+static int handle_client(CLIENT_T *clients) {  // Need to fix indent later
+        //int clientfd = clients->clientfd;
+        WOLFSSL *ssl = clients->ssl;
+        WOLFSSL* write_ssl = NULL;   /* may have separate w/ HAVE_WRITE_DUP */
+        char    command[SVR_COMMAND_SIZE+1];
+        int     firstRead = 1;
+        int     gotFirstG = 0;
+        int     err = 0;
+        int    ret = 0;
+        char   buffer[WOLFSSL_MAX_ERROR_SZ];
+        // int    shutDown = 0;
+        puts("handle_client()");
+
+#if defined(PEER_INFO)
+        showPeer(ssl);
+#endif
+
+#ifdef HAVE_WRITE_DUP
+        write_ssl = wolfSSL_write_dup(ssl);
+        if (write_ssl == NULL) {
+            fprintf(stderr, "wolfSSL_write_dup failed\n");
+            wolfSSL_free(ssl);
+            CloseSocket(clientfd);
+            // continue;
+            return;
+        }
+#else
+        write_ssl = ssl;
+#endif
+            int echoSz;
+
+            do {
+                err = 0; /* reset error */
+                puts("wolfSSL_read()");
+                ret = wolfSSL_read(ssl, command, sizeof(command)-1);
+                if (ret <= 0) {
+                    err = wolfSSL_get_error(ssl, 0);
+                #ifdef WOLFSSL_ASYNC_CRYPT
+                    if (err == WC_NO_ERR_TRACE(WC_PENDING_E)) {
+                        ret = wolfSSL_AsyncPoll(ssl, WOLF_POLL_FLAG_CHECK_HW);
+                        if (ret < 0) break;
+                    }
+                #endif
+                }
+            } while (err == WC_NO_ERR_TRACE(WC_PENDING_E));
+            if (ret <= 0) {
+                if (err != WOLFSSL_ERROR_WANT_READ && err != WOLFSSL_ERROR_ZERO_RETURN){
+                    fprintf(stderr, "SSL_read echo error %d, %s!\n", err,
+                        wolfSSL_ERR_error_string((unsigned long)err, buffer));
+                }
+                // break;
+                return 0;
+            }
+
+            echoSz = ret;
+
+            if (firstRead == 1) {
+                firstRead = 0;  /* browser may send 1 byte 'G' to start */
+                if (echoSz == 1 && command[0] == 'G') {
+                    gotFirstG = 1;
+                    // continue;
+                    return 0;
+                }
+            }
+            else if (gotFirstG == 1 && strncmp(command, "ET /", 4) == 0) {
+                strncpy(command, "GET", 4);
+                /* fall through to normal GET */
+            }
+
+            if ( strncmp(command, "quit", 4) == 0) {
+                printf("client sent quit command: shutting down!\n");
+                // return 1;
+                // shutDown = 1;
+                // break;
+                return 0;
+            }
+            if ( strncmp(command, "break", 5) == 0) {
+                printf("client sent break command: closing session!\n");
+                // break;
+                return 1;
+            }
+#ifdef PRINT_SESSION_STATS
+            if ( strncmp(command, "printstats", 10) == 0) {
+                wolfSSL_PrintSessionStats();
+                //break;
+                return 0;
+            }
+#endif
+            if (strncmp(command, "GET", 3) == 0) {
+                const char resp[] =
+                    "HTTP/1.0 200 ok\r\nContent-type: text/html\r\n\r\n"
+                    "<html><body BGCOLOR=\"#ffffff\"><pre>\r\n"
+                    "greetings from wolfSSL\r\n</pre></body></html>\r\n\r\n";
+
+                echoSz = (int)strlen(resp) + 1;
+                if (echoSz > (int)sizeof(command)) {
+                    /* Internal error. */
+                    err_sys("HTTP response greater than buffer.");
+                }
+                strncpy(command, resp, sizeof(command));
+
+                do {
+                    err = 0; /* reset error */
+                    ret = wolfSSL_write(write_ssl, command, echoSz);
+                    if (ret <= 0) {
+                        err = wolfSSL_get_error(write_ssl, 0);
+                    #ifdef WOLFSSL_ASYNC_CRYPT
+                        if (err == WC_NO_ERR_TRACE(WC_PENDING_E)) {
+                            ret = wolfSSL_AsyncPoll(write_ssl, WOLF_POLL_FLAG_CHECK_HW);
+                            if (ret < 0) break;
+                        }
+                    #endif
+                    }
+                } while (err == WC_NO_ERR_TRACE(WC_PENDING_E));
+                if (ret != echoSz) {
+                    fprintf(stderr, "SSL_write get error = %d, %s\n", err,
+                        wolfSSL_ERR_error_string((unsigned long)err, buffer));
+                    err_sys("SSL_write get failed");
+                }
+                //break;
+                return 0;
+            }
+            command[echoSz] = 0;
+
+        #ifdef ECHO_OUT
+            // Temporary disabled
+            // LIBCALL_CHECK_RET(fputs(command, fout));
+        #endif
+
+            do {
+                err = 0; /* reset error */
+                ret = wolfSSL_write(write_ssl, command, echoSz);
+                if (ret <= 0) {
+                    err = wolfSSL_get_error(write_ssl, 0);
+                #ifdef WOLFSSL_ASYNC_CRYPT
+                    if (err == WC_NO_ERR_TRACE(WC_PENDING_E)) {
+                        ret = wolfSSL_AsyncPoll(write_ssl, WOLF_POLL_FLAG_CHECK_HW);
+                        // if (ret < 0) break;
+                        if (ret < 0) return -1;
+                    }
+                #endif
+                }
+            } while (err == WC_NO_ERR_TRACE(WC_PENDING_E));
+
+            if (ret != echoSz) {
+                fprintf(stderr, "SSL_write echo error = %d, %s\n", err,
+                        wolfSSL_ERR_error_string((unsigned long)err, buffer));
+                err_sys("SSL_write echo failed");
+            }
+#ifndef WOLFSSL_DTLS
+        // wolfSSL_shutdown(ssl);
+#endif
+#ifdef HAVE_WRITE_DUP
+        wolfSSL_free(write_ssl);
+#endif
+        // wolfSSL_free(ssl);
+        // CloseSocket(clientfd);
+#ifdef WOLFSSL_DTLS
+        tcp_listen(&sockfd, &port, useAnyAddr, doDTLS, 0);
+        SignalReady(args, port);
+#endif
+    return 0;
+}
+
+THREAD_RETURN WOLFSSL_THREAD chatserver_test(void* args)
 {
-    SOCKET_T       sockfd = 0;
+    SOCKET_T        sockfd = 0;
     WOLFSSL_METHOD* method = 0;
     WOLFSSL_CTX*    ctx    = 0;
+    int accept_done = 0;
+    int err = 0;
+    int ret = 0;
+    char   buffer[WOLFSSL_MAX_ERROR_SZ];
 
-    int    ret = 0;
+    size_t i = 0;
     int    doDTLS = 0;
     int    doPSK;
     int    outCreated = 0;
-    int    shutDown = 0;
     int    useAnyAddr = 0;
     word16 port;
     int    argc = ((func_args*)args)->argc;
     char** argv = ((func_args*)args)->argv;
-    char   buffer[WOLFSSL_MAX_ERROR_SZ];
+
+    fd_set selected_set, detected_set;
+    int max_fd = 0;
+    size_t n_clients = 0;
+    const size_t max_clients = 8;
+    CLIENT_T clients[max_clients] = {0};
+    CLIENT_T* client = NULL;
+
+    int shutDown = 0;
+
 #ifdef HAVE_TEST_SESSION_TICKET
     MyTicketCtx myTicketCtx;
 #endif
@@ -293,20 +486,27 @@ THREAD_RETURN WOLFSSL_THREAD echoserver_test(void* args)
 #endif /* WOLFSSL_ASYNC_CRYPT */
 
     SignalReady(args, port);
+    
+    FD_ZERO(&selected_set);
+    FD_SET(sockfd, &selected_set);
+    max_fd = sockfd;
 
     while (!shutDown) {
-        WOLFSSL* ssl = NULL;
-        WOLFSSL* write_ssl = NULL;   /* may have separate w/ HAVE_WRITE_DUP */
-        char    command[SVR_COMMAND_SIZE+1];
-        int     clientfd;
-        int     firstRead = 1;
-        int     gotFirstG = 0;
-        int     err = 0;
-        SOCKADDR_IN_T client;
-        socklen_t     client_len = sizeof(client);
+        socklen_t     client_len = sizeof(clients[0]);
 #ifndef WOLFSSL_DTLS
-        clientfd = accept(sockfd, (struct sockaddr*)&client,
-                         (ACCEPT_THIRD_T)&client_len);
+        FD_COPY(&selected_set, &detected_set);
+        printf("select()\n");
+        select(max_fd + 1, &detected_set, NULL, NULL, NULL);  // Should set timeout?
+        if(n_clients < max_clients && FD_ISSET(sockfd, &detected_set)) {
+            client = &clients[n_clients];
+            client->clientfd = accept(sockfd, (struct sockaddr*)&(client->saddr),
+                         (ACCEPT_THIRD_T)&client_len);  // Better to check each client_len?
+            FD_SET(client->clientfd, &selected_set);
+            max_fd = max(max_fd, client->clientfd);
+            client->accept_done = 0;
+            printf("accept()=%d\n", client->clientfd);
+            ++n_clients;
+        }
 #else
         clientfd = sockfd;
         {
@@ -321,189 +521,59 @@ THREAD_RETURN WOLFSSL_THREAD echoserver_test(void* args)
                 err_sys("recvfrom failed");
         }
 #endif
-        if (WOLFSSL_SOCKET_IS_INVALID(clientfd)) err_sys("tcp accept failed");
+        for(i = 0; i < n_clients; ++i) {
+            client = &clients[i];
+            if(FD_ISSET(client->clientfd, &detected_set) && !client->accept_done) {
+                if (WOLFSSL_SOCKET_IS_INVALID(client->clientfd)) err_sys("tcp accept failed");
 
-        ssl = wolfSSL_new(ctx);
-        if (ssl == NULL) err_sys("SSL_new failed");
-        wolfSSL_set_fd(ssl, clientfd);
-        #ifdef WOLFSSL_DTLS
-            wolfSSL_dtls_set_peer(ssl, &client, client_len);
-        #endif
-        #if !defined(NO_FILESYSTEM) && !defined(NO_DH) && !defined(NO_ASN)
-            wolfSSL_SetTmpDH_file(ssl, dhParamFile, WOLFSSL_FILETYPE_PEM);
-        #elif !defined(NO_DH)
-            SetDH(ssl);  /* will repick suites with DHE, higher than PSK */
-        #endif
-
-        do {
-            err = 0; /* Reset error */
-            ret = wolfSSL_accept(ssl);
-            if (ret != WOLFSSL_SUCCESS) {
-                err = wolfSSL_get_error(ssl, 0);
-            #ifdef WOLFSSL_ASYNC_CRYPT
-                if (err == WC_NO_ERR_TRACE(WC_PENDING_E)) {
-                    ret = wolfSSL_AsyncPoll(ssl, WOLF_POLL_FLAG_CHECK_HW);
-                    if (ret < 0) break;
-                }
+                client->ssl = wolfSSL_new(ctx);
+                if (client->ssl == NULL) err_sys("SSL_new failed");
+                wolfSSL_set_fd(client->ssl, client->clientfd);
+            #ifdef WOLFSSL_DTLS
+                wolfSSL_dtls_set_peer(ssl, &client, client_len);
             #endif
-            }
-        } while (err == WC_NO_ERR_TRACE(WC_PENDING_E));
-        if (ret != WOLFSSL_SUCCESS) {
-            fprintf(stderr, "SSL_accept error = %d, %s\n", err,
-                wolfSSL_ERR_error_string((unsigned long)err, buffer));
-            fprintf(stderr, "SSL_accept failed\n");
-            wolfSSL_free(ssl);
-            CloseSocket(clientfd);
-            continue;
-        }
-#if defined(PEER_INFO)
-        showPeer(ssl);
-#endif
-
-#ifdef HAVE_WRITE_DUP
-        write_ssl = wolfSSL_write_dup(ssl);
-        if (write_ssl == NULL) {
-            fprintf(stderr, "wolfSSL_write_dup failed\n");
-            wolfSSL_free(ssl);
-            CloseSocket(clientfd);
-            continue;
-        }
-#else
-        write_ssl = ssl;
-#endif
-
-        while (1) {
-            int echoSz;
-
-            do {
-                err = 0; /* reset error */
-                ret = wolfSSL_read(ssl, command, sizeof(command)-1);
-                if (ret <= 0) {
-                    err = wolfSSL_get_error(ssl, 0);
-                #ifdef WOLFSSL_ASYNC_CRYPT
-                    if (err == WC_NO_ERR_TRACE(WC_PENDING_E)) {
-                        ret = wolfSSL_AsyncPoll(ssl, WOLF_POLL_FLAG_CHECK_HW);
-                        if (ret < 0) break;
-                    }
-                #endif
-                }
-            } while (err == WC_NO_ERR_TRACE(WC_PENDING_E));
-            if (ret <= 0) {
-                if (err != WOLFSSL_ERROR_WANT_READ && err != WOLFSSL_ERROR_ZERO_RETURN){
-                    fprintf(stderr, "SSL_read echo error %d, %s!\n", err,
-                        wolfSSL_ERR_error_string((unsigned long)err, buffer));
-                }
-                break;
-            }
-
-            echoSz = ret;
-
-            if (firstRead == 1) {
-                firstRead = 0;  /* browser may send 1 byte 'G' to start */
-                if (echoSz == 1 && command[0] == 'G') {
-                    gotFirstG = 1;
-                    continue;
-                }
-            }
-            else if (gotFirstG == 1 && strncmp(command, "ET /", 4) == 0) {
-                strncpy(command, "GET", 4);
-                /* fall through to normal GET */
-            }
-
-            if ( strncmp(command, "quit", 4) == 0) {
-                printf("client sent quit command: shutting down!\n");
-                shutDown = 1;
-                break;
-            }
-            if ( strncmp(command, "break", 5) == 0) {
-                printf("client sent break command: closing session!\n");
-                break;
-            }
-#ifdef PRINT_SESSION_STATS
-            if ( strncmp(command, "printstats", 10) == 0) {
-                wolfSSL_PrintSessionStats();
-                break;
-            }
-#endif
-            if (strncmp(command, "GET", 3) == 0) {
-                const char resp[] =
-                    "HTTP/1.0 200 ok\r\nContent-type: text/html\r\n\r\n"
-                    "<html><body BGCOLOR=\"#ffffff\"><pre>\r\n"
-                    "greetings from wolfSSL\r\n</pre></body></html>\r\n\r\n";
-
-                echoSz = (int)strlen(resp) + 1;
-                if (echoSz > (int)sizeof(command)) {
-                    /* Internal error. */
-                    err_sys("HTTP response greater than buffer.");
-                }
-                strncpy(command, resp, sizeof(command));
-
+            #if !defined(NO_FILESYSTEM) && !defined(NO_DH) && !defined(NO_ASN)
+                wolfSSL_SetTmpDH_file(client->ssl, dhParamFile, WOLFSSL_FILETYPE_PEM);
+            #elif !defined(NO_DH)
+                SetDH(ssl);  /* will repick suites with DHE, higher than PSK */
+            #endif
                 do {
-                    err = 0; /* reset error */
-                    ret = wolfSSL_write(write_ssl, command, echoSz);
-                    if (ret <= 0) {
-                        err = wolfSSL_get_error(write_ssl, 0);
+                    err = 0; /* Reset error */
+                    puts("wolfSSL_accept()");
+                    ret = wolfSSL_accept(client->ssl);
+                    if (ret != WOLFSSL_SUCCESS) {
+                        err = wolfSSL_get_error(client->ssl, 0);
                     #ifdef WOLFSSL_ASYNC_CRYPT
                         if (err == WC_NO_ERR_TRACE(WC_PENDING_E)) {
-                            ret = wolfSSL_AsyncPoll(write_ssl, WOLF_POLL_FLAG_CHECK_HW);
+                            ret = wolfSSL_AsyncPoll(ssl, WOLF_POLL_FLAG_CHECK_HW);
                             if (ret < 0) break;
                         }
-                    #endif
+                #endif
                     }
                 } while (err == WC_NO_ERR_TRACE(WC_PENDING_E));
-                if (ret != echoSz) {
-                    fprintf(stderr, "SSL_write get error = %d, %s\n", err,
-                        wolfSSL_ERR_error_string((unsigned long)err, buffer));
-                    err_sys("SSL_write get failed");
+                if (ret != WOLFSSL_SUCCESS) {
+                    fprintf(stderr, "SSL_accept error = %d, %s\n", err,
+                    wolfSSL_ERR_error_string((unsigned long)err, buffer));
+                    fprintf(stderr, "SSL_accept failed\n");
+                    wolfSSL_free(client->ssl);
+                    CloseSocket(client->clientfd);
                 }
-                break;
+                client->accept_done = 1;
             }
-            command[echoSz] = 0;
-
-        #ifdef ECHO_OUT
-            LIBCALL_CHECK_RET(fputs(command, fout));
-        #endif
-
-            do {
-                err = 0; /* reset error */
-                ret = wolfSSL_write(write_ssl, command, echoSz);
-                if (ret <= 0) {
-                    err = wolfSSL_get_error(write_ssl, 0);
-                #ifdef WOLFSSL_ASYNC_CRYPT
-                    if (err == WC_NO_ERR_TRACE(WC_PENDING_E)) {
-                        ret = wolfSSL_AsyncPoll(write_ssl, WOLF_POLL_FLAG_CHECK_HW);
-                        if (ret < 0) break;
-                    }
-                #endif
-                }
-            } while (err == WC_NO_ERR_TRACE(WC_PENDING_E));
-
-            if (ret != echoSz) {
-                fprintf(stderr, "SSL_write echo error = %d, %s\n", err,
-                        wolfSSL_ERR_error_string((unsigned long)err, buffer));
-                err_sys("SSL_write echo failed");
+            else if(FD_ISSET(client->clientfd, &detected_set) && client->accept_done) {
+                shutDown = handle_client(client);  // Need to check return value
             }
+            printf("accept_done=%d\n", accept_done);
         }
-#ifndef WOLFSSL_DTLS
-        wolfSSL_shutdown(ssl);
-#endif
-#ifdef HAVE_WRITE_DUP
-        wolfSSL_free(write_ssl);
-#endif
-        wolfSSL_free(ssl);
-        CloseSocket(clientfd);
-#ifdef WOLFSSL_DTLS
-        tcp_listen(&sockfd, &port, useAnyAddr, doDTLS, 0);
-        SignalReady(args, port);
-#endif
     }
 
     CloseSocket(sockfd);
     wolfSSL_CTX_free(ctx);
 
 #ifdef ECHO_OUT
-    if (outCreated)
-        fclose(fout);
+    // Temporary disabled
+    //if (outCreated)
+    //    fclose(fout);
 #endif
 
     ((func_args*)args)->return_code = 0;
@@ -555,7 +625,7 @@ THREAD_RETURN WOLFSSL_THREAD echoserver_test(void* args)
 #endif
         ChangeToWolfRoot();
 #ifndef NO_WOLFSSL_SERVER
-        echoserver_test(&args);
+        chatserver_test(&args);
 #endif
         wolfSSL_Cleanup();
 

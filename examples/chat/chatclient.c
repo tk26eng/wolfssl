@@ -1,4 +1,4 @@
-/* echoclient.c
+/* chatclient.c
  *
  * Copyright (C) 2006-2024 wolfSSL Inc.
  *
@@ -50,7 +50,7 @@
 #endif
 #include <wolfssl/openssl/ssl.h>
 
-#include <examples/echoclient/echoclient.h>
+#include <examples/chat/chatclient.h>
 
 #ifndef NO_WOLFSSL_CLIENT
 
@@ -69,7 +69,7 @@
 #endif
 
 
-void echoclient_test(void* args)
+void chatclient_test(void* args)
 {
     SOCKET_T sockfd = 0;
 
@@ -238,7 +238,7 @@ void echoclient_test(void* args)
 
     SSL_set_fd(ssl, sockfd);
 #if defined(USE_WINDOWS_API) && defined(WOLFSSL_DTLS) && defined(NO_MAIN_DRIVER)
-    /* let echoserver bind first, TODO: add Windows signal like pthreads does */
+    /* let chatserver bind first, TODO: add Windows signal like pthreads does */
     Sleep(100);
 #endif
 
@@ -404,7 +404,7 @@ void echoclient_test(void* args)
         ChangeToWolfRoot();
 #endif
 #ifndef NO_WOLFSSL_CLIENT
-        echoclient_test(&args);
+        chatclient_test(&args);
 #endif
 
         wolfSSL_Cleanup();

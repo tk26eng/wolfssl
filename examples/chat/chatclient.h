@@ -24,7 +24,7 @@
 #define WOLFSSL_ECHOCLIENT_H
 
 
-void echoclient_test(void* args);
+void chatclient_test(void* args);
 
 #endif /* WOLFSSL_ECHOCLIENT_H */
 

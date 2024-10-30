@@ -24,7 +24,7 @@
 #define WOLFSSL_ECHOSERVER_H
 
 
-THREAD_RETURN WOLFSSL_THREAD echoserver_test(void* args);
+THREAD_RETURN WOLFSSL_THREAD chatserver_test(void* args);
 
 
 #endif /* WOLFSSL_ECHOSERVER_H */
