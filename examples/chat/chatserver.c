@@ -39,7 +39,10 @@
         #include "wolfssl_MDK_ARM.h"
 #endif
 
+#include <search.h>
 #include <sys/select.h>
+#include <stdlib.h>
+#include <string.h>
 
 #include <wolfssl/ssl.h>
 #include <wolfssl/test.h>
@@ -88,6 +91,7 @@ typedef struct {
     SOCKET_T clientfd;
     WOLFSSL* ssl;
     int accept_done;
+    int inuse;
 } CLIENT_T;
 
 static int max(int a, int b) {
@@ -99,9 +103,8 @@ static int max(int a, int b) {
     }
 }
 
-static int handle_client(CLIENT_T *clients) {  // Need to fix indent later
-        //int clientfd = clients->clientfd;
-        WOLFSSL *ssl = clients->ssl;
+static int handle_client(CLIENT_T *client) {  // Need to fix indent later
+        WOLFSSL *ssl = client->ssl;
         WOLFSSL* write_ssl = NULL;   /* may have separate w/ HAVE_WRITE_DUP */
         char    command[SVR_COMMAND_SIZE+1];
         int     firstRead = 1;
@@ -173,7 +176,7 @@ static int handle_client(CLIENT_T *clients) {  // Need to fix indent later
                 // return 1;
                 // shutDown = 1;
                 // break;
-                return 0;
+                return 1;  // This means shutDown = 1;
             }
             if ( strncmp(command, "break", 5) == 0) {
                 printf("client sent break command: closing session!\n");
@@ -263,17 +266,141 @@ static int handle_client(CLIENT_T *clients) {  // Need to fix indent later
     return 0;
 }
 
+typedef struct {
+    size_t max_clients;
+    size_t n_clients;
+    CLIENT_T *client;
+    size_t next_index;
+} CLIENTS_T;  // This name might be confusing
+
+static CLIENTS_T *clients_init(size_t max_clients)
+{
+    size_t i;
+    CLIENT_T *client = NULL;
+    CLIENTS_T *clients = NULL;
+
+    clients = (CLIENTS_T *)malloc(sizeof(CLIENTS_T) + max_clients * sizeof(CLIENT_T));
+    if(clients != NULL) {
+        clients->max_clients = max_clients;
+        clients->n_clients = 0;
+        clients->client = (CLIENT_T*)((byte*)clients + sizeof(CLIENTS_T));
+        for(i = 0; i < max_clients; ++i) {
+            client = &(clients->client[i]);
+            client->inuse = 0;
+            memset(&(client->saddr), 0, sizeof(SOCKADDR_IN_T));
+            client->clientfd = -1; 
+            client->ssl = NULL;
+            client->accept_done = 0;
+        }
+        clients->next_index = 0;
+    }
+    return clients;
+}
+
+static CLIENT_T *clients_find_empty(CLIENTS_T *clients)
+{
+    size_t i;
+    CLIENT_T *client = NULL;
+   
+    if(clients->max_clients == clients->n_clients) {
+        return NULL;
+    }
+    
+    for(i = 0; i < clients->max_clients; ++i) {
+        client = &(clients->client[i]);
+        if(!client->inuse) {
+            break;
+        }
+    }
+    return client;
+}
+
+static void clients_reset_next(CLIENTS_T *clients)
+{
+    clients->next_index = 0;
+}
+
+static CLIENT_T *clients_find_next(CLIENTS_T *clients)
+{
+    // size_t i;
+    CLIENT_T *client = NULL;
+
+    if(clients->next_index >= clients->max_clients) {
+        return NULL;
+    }
+
+    while(clients->next_index < clients->max_clients) {
+        client = &(clients->client[clients->next_index]);
+        ++(clients->next_index);
+        if(client->inuse) {
+            break;
+        }
+    }
+
+    return client;
+}
+
+static CLIENT_T *clients_add(CLIENTS_T *clients)
+{
+    CLIENT_T *client = NULL;
+
+    client = clients_find_empty(clients);
+    if(client == NULL) {
+        return NULL;  
+    }
+    client->inuse = 1;
+    ++(clients->n_clients);
+
+    return client;
+}
+
+static void clients_print(CLIENTS_T *clients)
+{
+    size_t i;
+    CLIENT_T *client;
+
+    printf("clients->max_clients=%zu\n", clients->max_clients);
+    printf("clients->n_clients=%zu\n", clients->n_clients);
+    printf("clients->client=%p\n", clients->client);
+    printf("clients->next_index=%zu\n", clients->next_index);
+    for(i = 0; i < clients->max_clients; ++i) {
+        client = &(clients->client[i]);
+        printf("client[%zu]: ", i);
+        printf("accept_done=%d ", client->accept_done);
+        printf("clientfd=%d ", client->clientfd);
+        printf("inuse=%d ", client->inuse);
+        // printf("saddr=%d ", client->saddr);
+        printf("ssl=%p", client->ssl);
+        puts("");
+    }
+}
+
+static void clients_delete(CLIENTS_T *clients, CLIENT_T *client)
+{
+    client->inuse = 0;
+    memset(&(client->saddr), 0, sizeof(SOCKADDR_IN_T));
+    client->clientfd = -1; 
+    client->ssl = NULL;
+    client->accept_done = 0;
+
+    --(clients->n_clients);
+}
+
+static void clients_free(CLIENTS_T *clients)
+{
+    free(clients);
+}
+
 THREAD_RETURN WOLFSSL_THREAD chatserver_test(void* args)
 {
     SOCKET_T        sockfd = 0;
     WOLFSSL_METHOD* method = 0;
     WOLFSSL_CTX*    ctx    = 0;
-    int accept_done = 0;
     int err = 0;
     int ret = 0;
     char   buffer[WOLFSSL_MAX_ERROR_SZ];
 
-    size_t i = 0;
+    // size_t i = 0;
     int    doDTLS = 0;
     int    doPSK;
     int    outCreated = 0;
@@ -284,9 +411,9 @@ THREAD_RETURN WOLFSSL_THREAD chatserver_test(void* args)
 
     fd_set selected_set, detected_set;
     int max_fd = 0;
-    size_t n_clients = 0;
-    const size_t max_clients = 8;
-    CLIENT_T clients[max_clients] = {0};
+    // size_t n_clients = 0;
+    // const size_t max_clients = 8;
+    CLIENTS_T* clients = NULL; 
     CLIENT_T* client = NULL;
 
     int shutDown = 0;
@@ -491,21 +618,29 @@ THREAD_RETURN WOLFSSL_THREAD chatserver_test(void* args)
     FD_SET(sockfd, &selected_set);
     max_fd = sockfd;
 
+    clients = clients_init(8);
+    if(clients == NULL) {
+        fprintf(stderr, "Error: clients_init()\n");
+        exit(1);
+    }
+
     while (!shutDown) {
         socklen_t     client_len = sizeof(clients[0]);
 #ifndef WOLFSSL_DTLS
         FD_COPY(&selected_set, &detected_set);
         printf("select()\n");
         select(max_fd + 1, &detected_set, NULL, NULL, NULL);  // Should set timeout?
-        if(n_clients < max_clients && FD_ISSET(sockfd, &detected_set)) {
-            client = &clients[n_clients];
+        if(FD_ISSET(sockfd, &detected_set)) {
+            // client = &clients[n_clients];
+            client = clients_add(clients);
+            if(client == NULL) {
+                fprintf(stderr, "Error: clients_find_empty()\n"); 
+            }
             client->clientfd = accept(sockfd, (struct sockaddr*)&(client->saddr),
                          (ACCEPT_THIRD_T)&client_len);  // Better to check each client_len?
             FD_SET(client->clientfd, &selected_set);
             max_fd = max(max_fd, client->clientfd);
-            client->accept_done = 0;
             printf("accept()=%d\n", client->clientfd);
-            ++n_clients;
         }
 #else
         clientfd = sockfd;
@@ -521,8 +656,8 @@ THREAD_RETURN WOLFSSL_THREAD chatserver_test(void* args)
                 err_sys("recvfrom failed");
         }
 #endif
-        for(i = 0; i < n_clients; ++i) {
-            client = &clients[i];
+        clients_reset_next(clients);
+        while((client = clients_find_next(clients)) != NULL) {
             if(FD_ISSET(client->clientfd, &detected_set) && !client->accept_done) {
                 if (WOLFSSL_SOCKET_IS_INVALID(client->clientfd)) err_sys("tcp accept failed");
 
@@ -548,7 +683,7 @@ THREAD_RETURN WOLFSSL_THREAD chatserver_test(void* args)
                             ret = wolfSSL_AsyncPoll(ssl, WOLF_POLL_FLAG_CHECK_HW);
                             if (ret < 0) break;
                         }
-                #endif
+                    #endif
                     }
                 } while (err == WC_NO_ERR_TRACE(WC_PENDING_E));
                 if (ret != WOLFSSL_SUCCESS) {
@@ -561,12 +696,19 @@ THREAD_RETURN WOLFSSL_THREAD chatserver_test(void* args)
                 client->accept_done = 1;
             }
             else if(FD_ISSET(client->clientfd, &detected_set) && client->accept_done) {
-                shutDown = handle_client(client);  // Need to check return value
+                if(handle_client(client)) {  // shutDown
+                    FD_CLR(client->clientfd, &selected_set);
+                    wolfSSL_shutdown(client->ssl);
+                    wolfSSL_free(client->ssl);
+                    CloseSocket(client->clientfd);
+                    clients_delete(clients, client);
+                }
             }
-            printf("accept_done=%d\n", accept_done);
+            clients_print(clients);  // for debug
         }
     }
 
+    clients_free(clients);
     CloseSocket(sockfd);
     wolfSSL_CTX_free(ctx);
 
